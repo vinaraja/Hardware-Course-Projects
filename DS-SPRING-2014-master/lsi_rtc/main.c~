@@ -1,0 +1,579 @@
+/* main.c ---
+ *
+ * Filename: main.c
+ * Description:
+ * Author:
+ * Maintainer:
+ * Created: Thu Jan 10 11:23:43 2013
+ * Last-Updated:
+ *           By:
+ *     Update #: 0
+ * Keywords:
+ * Compatibility:
+ *
+ */
+
+/* Commentary:
+ *
+ *
+ *
+ */
+
+/* Change log:
+ *
+ *
+ */
+/* Code: */
+
+#include <f3d_led.h>     // Pull in include file for the local drivers
+#include <f3d_button.h>
+#include <f3d_uart.h>
+#include <stdio.h>
+#include<queue.h>
+#include<f3d_gyro.h>
+#include<f3d_systick.h>
+#include <sensor.h>
+#include<f3d_timer4.h>
+#include <stm32f30x.h> // Pull in include files for F30x standard drivers
+#include <f3d_sdcard.h>
+#include <stm32f30x_rtc.h>
+#include <diskio.h>
+#include <math.h>
+#include <stdio.h>
+#include<string.h>
+
+int h=0;
+int m1=0;
+int m2=0;
+int size = 0;
+FATFS Fatfs;    /* File system object */
+FIL Fil;    /* File object */
+BYTE Buff[128]; 
+void RTC_init(void) {
+  RTC_TimeTypeDef  RTC_TimeStructure;
+  RTC_DateTypeDef  RTC_DateStructure;
+  RTC_InitTypeDef  RTC_InitStructure;
+  
+  RCC_APB1PeriphClockCmd(RCC_APB1Periph_PWR, ENABLE);
+  PWR_BackupAccessCmd(ENABLE);   // Enable access to write to the RTC Registers
+  RCC_BackupResetCmd(ENABLE);
+  RCC_BackupResetCmd(DISABLE);
+
+  PWR_BackupAccessCmd(ENABLE);
+
+  /* LSI used as RTC source clock*/
+  RCC_LSICmd(ENABLE);
+  
+  /* Wait till LSI is ready */ 
+  while(RCC_GetFlagStatus(RCC_FLAG_LSIRDY) == RESET);
+  
+  RCC_RTCCLKConfig(RCC_RTCCLKSource_LSI);
+  RCC_RTCCLKCmd(ENABLE);
+  RTC_WaitForSynchro(); 
+  
+  RTC_StructInit(&RTC_InitStructure);   // Set the structure members to their default values
+  RTC_InitStructure.RTC_HourFormat = RTC_HourFormat_24;
+  RTC_InitStructure.RTC_AsynchPrediv = 88;
+  RTC_InitStructure.RTC_SynchPrediv = 470;
+  RTC_Init(&RTC_InitStructure); 
+
+  RTC_DateStructure.RTC_Year = 13;
+  RTC_DateStructure.RTC_Month = RTC_Month_November;
+  RTC_DateStructure.RTC_Date = 7;
+  RTC_DateStructure.RTC_WeekDay = RTC_Weekday_Thursday;
+  RTC_SetDate(RTC_Format_BCD, &RTC_DateStructure);
+
+  RTC_TimeStructure.RTC_H12     = RTC_H12_AM;
+  RTC_TimeStructure.RTC_Hours   = 0x09;
+  RTC_TimeStructure.RTC_Minutes = 0x05;
+  RTC_TimeStructure.RTC_Seconds = 0x00;  
+  RTC_SetTime(RTC_Format_BIN, &RTC_TimeStructure);
+}
+
+
+
+void getline(char *buf) {
+  char c;
+  c=getchar();
+  while ((c!='\n') && (c!='\r')) {
+    *buf++ = c;
+    putchar(c);
+    c = getchar();
+  }
+  *buf = 0;
+}
+
+int rtc_settime (char *buf) {
+  enum {HOUR,MINUTE,SECOND,MONTH,DAY,YEAR};
+
+  RTC_TimeTypeDef t;
+  RTC_DateTypeDef d;
+
+  char *tok_start = buf;
+  char *tok_end = buf;
+  int field = HOUR;
+
+  RTC_TimeStructInit(&t);
+  RTC_DateStructInit(&d);
+
+  while (field<=YEAR) {
+    while ((*tok_end != ',') && (*tok_end)) {
+      tok_end++;
+    }
+    *tok_end = 0;
+    switch (field++) {
+    case HOUR:
+      t.RTC_Hours=atoi(tok_start);
+      printf("hour = %d\n",t.RTC_Hours);
+      break;
+    case MINUTE:
+      t.RTC_Minutes=atoi(tok_start);
+      printf("min = %d\n",t.RTC_Minutes);
+      break;
+    case SECOND:
+      t.RTC_Seconds=atoi(tok_start);
+      printf("sec = %d\n",t.RTC_Seconds);
+      break;
+    case MONTH:
+      d.RTC_Month=atoi(tok_start);
+      printf("month = %d\n",d.RTC_Month);
+      break;
+    case DAY:
+      d.RTC_Date=atoi(tok_start);
+      printf("day = %d\n",d.RTC_Date);
+      break;
+    case YEAR:
+      d.RTC_Year=atoi(tok_start) - 2000;
+      printf("year = %d\n",d.RTC_Year);
+      break;
+    }
+    tok_end++;
+    tok_start=tok_end;
+  }
+
+  PWR_BackupAccessCmd(ENABLE);
+  RTC_SetTime(RTC_Format_BIN, &t);
+  RTC_SetDate(RTC_Format_BIN, &d);
+  PWR_BackupAccessCmd(DISABLE);
+  return (0);
+}
+
+
+void delay1(void) {
+  int i = 20000000;
+	
+  while (i-- > 0) {
+    asm("nop"); /* This stops it optimising code out */
+	
+  }
+
+}
+void datalog(int h,int m,int s,int event)
+{
+  FRESULT rc;    /* Result code */
+  DIR dir;    /* Directory object */
+  FILINFO fno;    /* File information object */
+  UINT bw, br;
+  unsigned int retval;
+  int i;
+  f3d_delay_init();
+  f3d_sdcard_init();
+  /* Provide a delay to allow the SDCARD time to go through it's power
+up initialization. */
+  for (i=0;i<500;i++) {
+    f3d_delay_uS(500);
+  }
+  char string[50];
+  
+	if(event == 1)
+    {
+        sprintf(string,"movement took place at: %d:%d:%d\n",h,m,s);
+    }
+
+
+    if(event == 2)
+    {
+        sprintf(string,"Button 1 was pressed at %d:%d:%d\n",h,m,s);
+    }
+    if(event == 3)
+    {
+        sprintf(string,"Button 1 was pressed at %d:%d:%d\n",h,m,s);
+    }
+    if(event == 4)
+    {
+        sprintf(string,"The Alarm was set at %d:%d:%d\n",h,m,s);
+    }
+    if(event == 5)
+    {
+        sprintf(string,"The Alarm went on at %d:%d:%d\n",h,m,s);
+    }
+    if(event == 6)
+    {
+        sprintf(string,"The Alarm went off at %d:%d:%d\n",h,m,s);
+    }		
+  //printf("Board Reset\n");
+
+  f_mount(0, &Fatfs);    /* Register volume work area (never fails) */
+  
+  //printf("\nOpen an existing file (message.txt).\n");
+  rc = f_open(&Fil, "MESSAGE.TXT", FA_WRITE);
+  if (rc) die(rc);
+  size = f_size(&Fil);
+  rc = f_lseek(&Fil,size+1);
+  //printf("The alarm was set at");
+  rc = f_write(&Fil,string, strlen(string), &bw);
+  if (rc) die(rc);
+  //printf("%u bytes written.\n", bw);
+  //printf("\nClose the file.\n");
+  rc = f_close(&Fil);
+  if (rc) die(rc);
+  //printf("\nOpen an existing file (message.txt).\n");
+    rc = f_open(&Fil, "MESSAGE.TXT", FA_READ);
+   if (rc) die(rc);
+
+  //printf("\nType the file content.\n");
+  for (;;) {
+    rc = f_read(&Fil, Buff, sizeof Buff, &br);    /* Read a chunk of file */
+    if (rc || !br) break;    /* Error or end of file */
+    for (i = 0; i < br; i++)    /* Type the data */
+      putchar(Buff[i]);
+  }
+  if (rc) die(rc);
+ 
+  //printf("\nClose the file.\n");
+  rc = f_close(&Fil);
+  if (rc) die(rc);
+ 
+  /*printf("\nCreate a new file (hello.txt).\n");
+  rc = f_open(&Fil, "HELLO.TXT", FA_WRITE | FA_CREATE_ALWAYS);
+  if (rc) die(rc);*/
+ 
+  //printf("\nWrite a text data. (Hello world!)\n");
+  //rc = f_write(&Fil, "Hello world!\r\n", 14, &bw);
+  //if (rc) die(rc);
+  //printf("%u bytes written.\n", bw);
+ 
+  //printf("\nClose the file.\n");
+ // rc = f_close(&Fil);
+  //if (rc) die(rc);
+ 
+  //printf("\nOpen root directory.\n");
+  rc = f_opendir(&dir, "");
+  if (rc) die(rc);
+ 
+  //printf("\nDirectory listing...\n");
+  for (;;) {
+    rc = f_readdir(&dir, &fno);    /* Read a directory item */
+    if (rc || !fno.fname[0]) break;    /* Error or end of dir */
+    if (fno.fattrib & AM_DIR)
+      printf(" <dir> %s\n", fno.fname);
+    else
+      printf("%8lu %s\n", fno.fsize, fno.fname);
+  }
+  if (rc) die(rc);
+  //printf("\nTest completed.\n");
+
+  rc = disk_ioctl(0,GET_SECTOR_COUNT,&retval);
+  //printf("%d %d\n",rc,retval);
+ // while (1);
+}
+
+
+
+void hoursdisplay(int hours)
+{
+	int time;
+	f3d_led_all_off();
+	if(hours>12)
+	   time=hours-12;
+	else {
+	   time=hours;
+	}
+	if(time<=8) {
+	   f3d_led_on(time);
+	}
+	else {
+	   if(time==9) {
+	      f3d_led_on(1);
+	      f3d_led_on(2);
+	   }
+	   if(time==10) {
+	      f3d_led_on(1);
+	      f3d_led_on(2);
+	      f3d_led_on(3);
+	   }
+	   if(time==11) {
+	      f3d_led_on(1);
+	      f3d_led_on(2);
+	      f3d_led_on(3);
+	      f3d_led_on(4);
+	   }
+	   if(time==12) {
+	      f3d_led_on(1);
+	      f3d_led_on(2);
+	      f3d_led_on(3);
+	      f3d_led_on(4);
+	      f3d_led_on(5);
+	   }
+	}
+}
+
+void displayminutesten(int minutes)
+{
+	f3d_led_all_off();
+	int time=minutes;
+ 	if(time<=8) {
+	f3d_led_on(time);
+	}
+	else {
+	   if(time==9) {
+	      f3d_led_on(1);
+	      f3d_led_on(2);
+	   }
+	}
+}
+
+void displayminutesunits(int minutes)
+{
+	f3d_led_all_off();
+	int time=minutes;
+	if(time<=8) {
+	   f3d_led_on(time);
+	}
+	else {
+	   if(time==9) {
+	      f3d_led_on(1);
+	      f3d_led_on(2);
+	   }
+	}
+}
+
+int setalarm(int h,int mm,int s)
+{	int m=1;
+	int flag=0;
+	while(f3d_button_read()==2);
+	while(f3d_button_read()!=2) {
+	if(flag==0)
+	{datalog(h,mm,s,3);flag=1;}
+	if(m<=8)
+{
+	   int i=0;
+	   f3d_led_on(m);
+	   while(i<1000000) {
+	      if(f3d_button_read()==1)
+	         return m;
+ 	      i++;
+	   }
+	   f3d_led_off(m);
+	   m++;		
+	}
+
+	else if(m>8)
+	{
+	   int i=0;
+	   int n=m%8;
+	   f3d_led_on(n);
+	   while(i<1000000) {
+	      if(f3d_button_read()==1)
+	         return m;
+ 	      i++;
+	   }
+	   f3d_led_off(n);
+	   m++;		
+	}
+}
+}
+
+
+
+/*void alarm(int m,int n,int actualm,int actualn)
+{
+if(actualm==m && actualn==n)
+{
+f3d_frequency(20000);
+delay();
+f3d_frequency(0);
+}
+return;
+}*/
+
+
+
+
+void main(void) {
+  int seconds;
+  int flag =0;
+  char linebuffer[100];
+  char field[30];
+  char *p = field;
+  char delimiter[] = ",";
+  int field_num;
+  int plm;
+  int c;
+  int count=0;
+
+  setvbuf(stdin, NULL, _IONBF, 0);
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
+
+  f3d_led_init();
+  f3d_button_init();
+  f3d_uart_init();
+  f3d_gyro_init();
+  f3d_delay_init();
+  f3d_systick_init();
+  f3d_sdcard_init();
+  f3d_uart_init();
+  f3d_sensor_interface_init();
+  f3d_sensor_init();
+  f3d_timer4_init();
+  RTC_init();
+  
+  RTC_TimeTypeDef RTC_TimeStructure;
+  RTC_DateTypeDef RTC_DateStructure;
+
+ 
+
+ 
+  printf("RTC Code Start\n");
+  printf("@\n");
+
+  getline(linebuffer);
+  printf("\nHere is the line: %s\n",linebuffer);
+  printf("#\n");
+  	int j;
+  rtc_settime(linebuffer);
+  
+  /*while(1){ 
+   if(f3d_button_read()==2) { 
+       f3d_led_on(1); 
+     } 
+     else { 
+       f3d_led_off(1); 
+     } 
+   }*/ 
+	//int flag=0;	
+	RTC_GetTime(RTC_Format_BIN,&RTC_TimeStructure);
+    RTC_GetDate(RTC_Format_BIN,&RTC_DateStructure);	
+ int flag2=1;
+ int flagu=0;
+int flaayu=1;
+int nk;
+int cd;
+  while (1) {
+
+    if (seconds!=RTC_TimeStructure.RTC_Seconds) {
+      printf("%02d:%02d:%02d ",RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds);
+      printf("%d/%d/%d\n",RTC_DateStructure.RTC_Month,RTC_DateStructure.RTC_Date,RTC_DateStructure.RTC_Year + 2000); 
+	while(f3d_button_read() != 2){
+	   RTC_GetTime(RTC_Format_BIN,&RTC_TimeStructure);
+    	   RTC_GetDate(RTC_Format_BIN,&RTC_DateStructure);
+	   hoursdisplay(RTC_TimeStructure.RTC_Hours);
+
+
+
+    int16_t pfData[3]={0,0,0};
+    float raw[3];
+    f3d_gyro_getdata(pfData);
+
+   for(nk=0; nk<3; nk++) {
+   raw[nk]=(float)pfData[nk]/L3G_Sensitivity_500dps;
+   if(raw[nk]>500){
+	printf("%f",raw[nk]);
+    flaayu=0;}
+ }
+if(flaayu==0)
+{
+RTC_GetTime(RTC_Format_BIN,&RTC_TimeStructure);
+    RTC_GetDate(RTC_Format_BIN,&RTC_DateStructure);
+    datalog(RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds,1);
+flaayu=1;
+
+}
+
+
+
+
+
+
+
+
+
+
+	   //printf("ALARM SET TO %d:%d%d\n",h,m1,m2);
+           //printf("%02d:%02d:%02d\n ",RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes);
+	   int p=h+12;
+	   int min=((m1*10)+m2);
+           int sec= RTC_TimeStructure.RTC_Seconds;
+           //printf("ALARM SET TO %d:%d\n",p,min);
+	
+           while((RTC_TimeStructure.RTC_Hours==p) && (RTC_TimeStructure.RTC_Minutes==min) && sec < RTC_TimeStructure.RTC_Seconds+30){
+                
+                f3d_frequency(2000);
+		if(flag2==1)
+		{datalog(RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds,5);flag2=0;}
+	         flagu=1;
+		RTC_GetTime(RTC_Format_BIN,&RTC_TimeStructure);
+		sec= RTC_TimeStructure.RTC_Seconds;
+
+	   }
+		if(flagu==1)
+		{
+		f3d_frequency(0);
+		datalog(RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds,6);
+		flagu=0;
+		}
+          
+   
+	   if(f3d_button_read()==1){
+	      while(f3d_button_read()==1);
+	      while(f3d_button_read()==0);
+	      int minutes=RTC_TimeStructure.RTC_Minutes;
+	      int m=minutes/10;
+	      int n=minutes%10;
+	      if(f3d_button_read()==1) {
+	         displayminutesten(m);
+		datalog(RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds,2);
+	      }
+	      while(f3d_button_read()==1);
+	      while(f3d_button_read()==0);
+	      if(f3d_button_read()==1) {
+		
+	         displayminutesten(n);
+		datalog(RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds,3);
+	      }
+	      while(f3d_button_read()==1);
+	     //while(f3d_button_read()==0);
+           }   
+        }
+	printf("ALARM MODE\n");
+	f3d_led_all_off();
+	h = setalarm(RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds);
+	f3d_led_all_off();
+	while(f3d_button_read()==1);
+	m1 = setalarm(RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds);
+	f3d_led_all_off();
+	while(f3d_button_read()==1);
+	m2 = setalarm(RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds);
+        if(((m1*10)+m2)>59)
+	{
+        printf("Wrong minutes Reset the alarm");
+        }
+        char a;
+	datalog(RTC_TimeStructure.RTC_Hours,RTC_TimeStructure.RTC_Minutes,RTC_TimeStructure.RTC_Seconds,4);
+	printf("ALARM SET TO %d:%d%d\n",h,m1,m2);
+	
+    }
+  }
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t* file, uint32_t line) {
+  printf("Assertion: %s %d\n",file, line);
+/* Infinite loop */
+/* Use GDB to find out why we're here */
+  while (1);
+}
+#endif
+
+/* main.c ends here */
